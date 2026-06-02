@@ -1,5 +1,7 @@
 # Codex Quota Touch Bar
 
+[中文说明](README.zh-CN.md)
+
 A small personal macOS menu bar and Touch Bar utility for showing local Codex quota state.
 
 It reads Codex rate-limit data from the local Codex app-server when available, then falls back to the latest local Codex session JSONL file.
