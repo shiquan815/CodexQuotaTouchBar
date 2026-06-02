@@ -196,7 +196,15 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 @property(nonatomic, strong) QuotaSnapshot *snapshot;
 @property(nonatomic, strong) NSDateFormatter *timeFormatter;
 @property(nonatomic, strong) NSDateFormatter *dateFormatter;
+@property(nonatomic, weak) NSTextField *primaryRemainingLabel;
+@property(nonatomic, weak) NSTextField *primaryResetLabel;
+@property(nonatomic, weak) NSView *primaryBarView;
+@property(nonatomic, weak) NSTextField *secondaryRemainingLabel;
+@property(nonatomic, weak) NSTextField *secondaryResetLabel;
+@property(nonatomic, weak) NSView *secondaryBarView;
+@property(nonatomic, strong) NSButtonTouchBarItem *trayButtonItem;
 - (NSTouchBar *)makeTouchBar;
+- (void)refreshVisiblePanel;
 - (void)presentSystemModalIfPossible;
 - (void)addSystemTrayButton;
 - (void)removeSystemTrayButton;
@@ -301,36 +309,66 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 - (NSView *)rowWithTitle:(NSString *)title window:(RateWindow *)window y:(CGFloat)y weekly:(BOOL)weekly {
     NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(92, y, 420, 13)];
     [row addSubview:[self label:title frame:NSMakeRect(0, -1, 58, 15) font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold] color:NSColor.whiteColor alignment:NSTextAlignmentLeft]];
-    [row addSubview:[self segmentedBarForWindow:window frame:NSMakeRect(66, 1, 198, 10)]];
+    NSView *bar = [self segmentedBarForWindow:window frame:NSMakeRect(66, 1, 198, 10)];
+    [row addSubview:bar];
 
     NSString *remaining = window ? [NSString stringWithFormat:@"%ld%%", (long)window.remainingPercent] : @"--";
-    [row addSubview:[self label:remaining frame:NSMakeRect(285, -1, 44, 15) font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold] color:NSColor.whiteColor alignment:NSTextAlignmentLeft]];
+    NSTextField *remainingLabel = [self label:remaining frame:NSMakeRect(285, -1, 44, 15) font:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold] color:NSColor.whiteColor alignment:NSTextAlignmentLeft];
+    [row addSubview:remainingLabel];
 
-    NSString *reset = @"--";
-    if (window.resetsAt) {
-        if (weekly) {
-            NSTimeInterval seconds = [window.resetsAt timeIntervalSinceDate:NSDate.date];
-            seconds = MAX(0, seconds);
-            if (seconds <= 86400.0) {
-                NSInteger totalMinutes = (NSInteger)ceil(seconds / 60.0);
-                NSInteger hours = totalMinutes / 60;
-                NSInteger minutes = totalMinutes % 60;
-                reset = [NSString stringWithFormat:@"%ldh %ldmin", (long)hours, (long)minutes];
-            } else {
-                NSInteger days = (NSInteger)ceil(seconds / 86400.0);
-                reset = [NSString stringWithFormat:@"%ld天", (long)days];
-            }
-        } else {
-            NSTimeInterval seconds = MAX(0, [window.resetsAt timeIntervalSinceDate:NSDate.date]);
-            NSInteger totalMinutes = (NSInteger)ceil(seconds / 60.0);
-            NSInteger hours = totalMinutes / 60;
-            NSInteger minutes = totalMinutes % 60;
-            reset = [NSString stringWithFormat:@"%ldh %ldmin", (long)hours, (long)minutes];
-        }
+    NSTextField *resetLabel = [self label:[self resetTextForWindow:window weekly:weekly] frame:NSMakeRect(348, -1, 72, 15) font:[NSFont systemFontOfSize:13 weight:NSFontWeightMedium] color:[NSColor colorWithWhite:0.88 alpha:1.0] alignment:NSTextAlignmentLeft];
+    [row addSubview:resetLabel];
+
+    if (weekly) {
+        self.secondaryBarView = bar;
+        self.secondaryRemainingLabel = remainingLabel;
+        self.secondaryResetLabel = resetLabel;
+    } else {
+        self.primaryBarView = bar;
+        self.primaryRemainingLabel = remainingLabel;
+        self.primaryResetLabel = resetLabel;
     }
-    [row addSubview:[self label:reset frame:NSMakeRect(348, -1, 72, 15) font:[NSFont systemFontOfSize:13 weight:NSFontWeightMedium] color:[NSColor colorWithWhite:0.88 alpha:1.0] alignment:NSTextAlignmentLeft]];
 
     return row;
+}
+
+- (NSString *)resetTextForWindow:(RateWindow *)window weekly:(BOOL)weekly {
+    if (!window.resetsAt) return @"--";
+    NSTimeInterval seconds = MAX(0, [window.resetsAt timeIntervalSinceDate:NSDate.date]);
+    NSInteger totalMinutes = (NSInteger)ceil(seconds / 60.0);
+    if (weekly && seconds > 86400.0) {
+        NSInteger days = (NSInteger)ceil(seconds / 86400.0);
+        return [NSString stringWithFormat:@"%ld天", (long)days];
+    }
+    NSInteger hours = totalMinutes / 60;
+    NSInteger minutes = totalMinutes % 60;
+    return [NSString stringWithFormat:@"%ldh %ldmin", (long)hours, (long)minutes];
+}
+
+- (void)refreshVisiblePanel {
+    [self updateRemainingLabel:self.primaryRemainingLabel resetLabel:self.primaryResetLabel bar:self.primaryBarView window:self.snapshot.primary weekly:NO];
+    [self updateRemainingLabel:self.secondaryRemainingLabel resetLabel:self.secondaryResetLabel bar:self.secondaryBarView window:self.snapshot.secondary weekly:YES];
+}
+
+- (void)updateRemainingLabel:(NSTextField *)remainingLabel resetLabel:(NSTextField *)resetLabel bar:(NSView *)bar window:(RateWindow *)window weekly:(BOOL)weekly {
+    if (remainingLabel) {
+        remainingLabel.stringValue = window ? [NSString stringWithFormat:@"%ld%%", (long)window.remainingPercent] : @"--";
+    }
+    if (resetLabel) {
+        resetLabel.stringValue = [self resetTextForWindow:window weekly:weekly];
+    }
+    if (bar) {
+        NSRect frame = bar.frame;
+        NSView *row = bar.superview;
+        [bar removeFromSuperview];
+        NSView *newBar = [self segmentedBarForWindow:window frame:frame];
+        [row addSubview:newBar positioned:NSWindowBelow relativeTo:remainingLabel];
+        if (weekly) {
+            self.secondaryBarView = newBar;
+        } else {
+            self.primaryBarView = newBar;
+        }
+    }
 }
 
 - (NSView *)segmentedBarForWindow:(RateWindow *)window frame:(NSRect)frame {
@@ -389,25 +427,27 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 - (void)addSystemTrayButton {
     SEL addSelector = NSSelectorFromString(@"addSystemTrayItem:");
     if (![NSTouchBarItem respondsToSelector:addSelector]) return;
-    [self removeSystemTrayButton];
-    NSButtonTouchBarItem *item = [self systemTrayButton];
+    if (!self.trayButtonItem) {
+        self.trayButtonItem = [self systemTrayButton];
+    }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    [NSTouchBarItem performSelector:addSelector withObject:item];
+    [NSTouchBarItem performSelector:addSelector withObject:self.trayButtonItem];
 #pragma clang diagnostic pop
 }
 
 - (void)removeSystemTrayButton {
     SEL removeSelector = NSSelectorFromString(@"removeSystemTrayItem:");
     if (![NSTouchBarItem respondsToSelector:removeSelector]) return;
-    NSButtonTouchBarItem *item = [NSButtonTouchBarItem buttonTouchBarItemWithIdentifier:@"codex.quota.tray"
-                                                                                  title:@"Codex"
-                                                                                 target:nil
-                                                                                 action:nil];
+    NSButtonTouchBarItem *item = self.trayButtonItem ?: [NSButtonTouchBarItem buttonTouchBarItemWithIdentifier:@"codex.quota.tray"
+                                                                                                         title:@"Codex"
+                                                                                                        target:nil
+                                                                                                        action:nil];
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     [NSTouchBarItem performSelector:removeSelector withObject:item];
 #pragma clang diagnostic pop
+    self.trayButtonItem = nil;
 }
 @end
 
@@ -416,9 +456,11 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 @property(nonatomic, strong) CodexClient *client;
 @property(nonatomic, strong) TouchBarController *touchBarController;
 @property(nonatomic, strong) QuotaSnapshot *latest;
-@property(nonatomic, strong) NSTimer *trayKeepAliveTimer;
-@property(nonatomic, strong) NSTimer *displayRefreshTimer;
+@property(nonatomic) dispatch_source_t dataRefreshTimer;
+@property(nonatomic) dispatch_source_t trayKeepAliveTimer;
+@property(nonatomic) dispatch_source_t displayRefreshTimer;
 @property(nonatomic) BOOL isFetching;
+@property(nonatomic) BOOL touchBarPanelVisible;
 @end
 
 @implementation AppDelegate
@@ -441,13 +483,32 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
     NSApp.touchBar = [self.touchBarController makeTouchBar];
     [self.touchBarController addSystemTrayButton];
     [self refreshNow];
-    [NSTimer scheduledTimerWithTimeInterval:30 target:self selector:@selector(refreshNow) userInfo:nil repeats:YES];
-    self.trayKeepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(keepTrayButtonAlive) userInfo:nil repeats:YES];
-    self.displayRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(refreshDisplayedCountdowns) userInfo:nil repeats:YES];
+    [self startTimers];
     [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self
                                                        selector:@selector(activeApplicationChanged:)
                                                            name:NSWorkspaceDidActivateApplicationNotification
                                                          object:nil];
+}
+
+- (void)startTimers {
+    self.dataRefreshTimer = [self repeatingMainTimerWithInterval:30.0 block:^{
+        [self refreshNow];
+    }];
+    self.trayKeepAliveTimer = [self repeatingMainTimerWithInterval:15.0 block:^{
+        [self keepTrayButtonAlive];
+    }];
+    self.displayRefreshTimer = [self repeatingMainTimerWithInterval:10.0 block:^{
+        [self refreshDisplayedCountdowns];
+    }];
+}
+
+- (dispatch_source_t)repeatingMainTimerWithInterval:(NSTimeInterval)interval block:(dispatch_block_t)block {
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    uint64_t nanoseconds = (uint64_t)(interval * (NSTimeInterval)NSEC_PER_SEC);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, nanoseconds), nanoseconds, (uint64_t)(1.0 * (NSTimeInterval)NSEC_PER_SEC));
+    dispatch_source_set_event_handler(timer, block);
+    dispatch_resume(timer);
+    return timer;
 }
 
 - (NSImage *)menuBarIcon {
@@ -474,7 +535,7 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
         if (snapshot) self.latest = snapshot;
         self.statusItem.button.title = [self titleForSnapshot:self.latest refreshing:NO];
         self.touchBarController.snapshot = self.latest;
-        NSApp.touchBar = [self.touchBarController makeTouchBar];
+        [self.touchBarController refreshVisiblePanel];
         [self.touchBarController addSystemTrayButton];
     }];
 }
@@ -486,6 +547,7 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 }
 
 - (void)showTouchBarPanel {
+    self.touchBarPanelVisible = YES;
     self.touchBarController.snapshot = self.latest;
     NSApp.touchBar = [self.touchBarController makeTouchBar];
     [self.touchBarController presentSystemModalIfPossible];
@@ -497,8 +559,9 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 }
 
 - (void)refreshDisplayedCountdowns {
+    self.statusItem.button.title = [self titleForSnapshot:self.latest refreshing:self.isFetching];
     self.touchBarController.snapshot = self.latest;
-    NSApp.touchBar = [self.touchBarController makeTouchBar];
+    [self.touchBarController refreshVisiblePanel];
     [self.touchBarController addSystemTrayButton];
 }
 
@@ -507,6 +570,7 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 }
 
 - (void)hideTouchBar {
+    self.touchBarPanelVisible = NO;
     SEL selector = NSSelectorFromString(@"dismissSystemModalTouchBar:");
     if (![NSTouchBar respondsToSelector:selector]) return;
 #pragma clang diagnostic push
@@ -516,6 +580,9 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 }
 
 - (void)quit {
+    if (self.dataRefreshTimer) dispatch_source_cancel(self.dataRefreshTimer);
+    if (self.trayKeepAliveTimer) dispatch_source_cancel(self.trayKeepAliveTimer);
+    if (self.displayRefreshTimer) dispatch_source_cancel(self.displayRefreshTimer);
     [self.touchBarController removeSystemTrayButton];
     [NSApp terminate:nil];
 }
