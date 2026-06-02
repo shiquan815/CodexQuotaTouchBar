@@ -6,6 +6,10 @@ A small personal macOS menu bar and Touch Bar utility for showing local Codex qu
 
 It reads Codex rate-limit data from the local Codex app-server when available, then falls back to the latest local Codex session JSONL file.
 
+## Preview
+
+![Touch Bar preview](docs/images/touchbar-preview.png)
+
 ## Features
 
 - Menu bar status with the 5-hour and weekly Codex quota percentages.

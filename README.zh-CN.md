@@ -4,6 +4,10 @@
 
 它优先通过本机 Codex app-server 读取额度信息；如果读取失败，会回退读取本地 Codex 会话 JSONL 文件中的最近一次额度数据。
 
+## 效果预览
+
+![Touch Bar 效果预览](docs/images/touchbar-preview.png)
+
 ## 功能
 
 - 在菜单栏显示 Codex 5 小时额度和每周额度剩余百分比。
