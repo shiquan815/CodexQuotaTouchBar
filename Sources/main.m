@@ -152,9 +152,26 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
         task.standardOutput = output;
         task.standardError = err;
 
+        NSMutableData *outputData = NSMutableData.data;
+        NSMutableData *errorData = NSMutableData.data;
+        output.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
+            NSData *data = handle.availableData;
+            if (data.length) @synchronized (outputData) {
+                [outputData appendData:data];
+            }
+        };
+        err.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
+            NSData *data = handle.availableData;
+            if (data.length) @synchronized (errorData) {
+                [errorData appendData:data];
+            }
+        };
+
         @try {
             [task launch];
         } @catch (NSException *exception) {
+            output.fileHandleForReading.readabilityHandler = nil;
+            err.fileHandleForReading.readabilityHandler = nil;
             completion(ReadJSONLFallback(), [NSError errorWithDomain:@"CodexQuota" code:2 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Launch failed"}]);
             return;
         }
@@ -176,14 +193,36 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
         [NSThread sleepForTimeInterval:0.15];
         send(@{@"jsonrpc": @"2.0", @"id": @2, @"method": @"account/rateLimits/read", @"params": NSNull.null});
         [NSThread sleepForTimeInterval:2.0];
-        [task terminate];
-        NSData *data = [output.fileHandleForReading readDataToEndOfFile];
+        @try {
+            [input.fileHandleForWriting closeFile];
+        } @catch (__unused NSException *exception) {
+        }
+
+        if (task.running) [task terminate];
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.0];
+        while (task.running && [deadline timeIntervalSinceNow] > 0) {
+            [NSThread sleepForTimeInterval:0.05];
+        }
+        if (task.running) {
+            [task interrupt];
+        }
+        [NSThread sleepForTimeInterval:0.1];
+        output.fileHandleForReading.readabilityHandler = nil;
+        err.fileHandleForReading.readabilityHandler = nil;
+
+        NSData *data = nil;
+        @synchronized (outputData) {
+            data = outputData.copy;
+        }
         QuotaSnapshot *snapshot = ParseJSONLines(data) ?: ReadJSONLFallback();
         dispatch_async(dispatch_get_main_queue(), ^{
             if (snapshot) {
                 completion(snapshot, nil);
             } else {
-                NSData *errData = [err.fileHandleForReading readDataToEndOfFile];
+                NSData *errData = nil;
+                @synchronized (errorData) {
+                    errData = errorData.copy;
+                }
                 NSString *message = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding] ?: @"No quota data";
                 completion(nil, [NSError errorWithDomain:@"CodexQuota" code:3 userInfo:@{NSLocalizedDescriptionKey: message}]);
             }
@@ -334,7 +373,8 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 
 - (NSString *)resetTextForWindow:(RateWindow *)window weekly:(BOOL)weekly {
     if (!window.resetsAt) return @"--";
-    NSTimeInterval seconds = MAX(0, [window.resetsAt timeIntervalSinceDate:NSDate.date]);
+    NSTimeInterval seconds = [window.resetsAt timeIntervalSinceDate:NSDate.date];
+    if (seconds <= 0.0) return @"now";
     NSInteger totalMinutes = (NSInteger)ceil(seconds / 60.0);
     if (weekly && seconds > 86400.0) {
         NSInteger days = (NSInteger)ceil(seconds / 86400.0);
@@ -456,11 +496,14 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 @property(nonatomic, strong) CodexClient *client;
 @property(nonatomic, strong) TouchBarController *touchBarController;
 @property(nonatomic, strong) QuotaSnapshot *latest;
-@property(nonatomic) dispatch_source_t dataRefreshTimer;
-@property(nonatomic) dispatch_source_t trayKeepAliveTimer;
-@property(nonatomic) dispatch_source_t displayRefreshTimer;
+@property(nonatomic, strong) dispatch_source_t dataRefreshTimer;
+@property(nonatomic, strong) dispatch_source_t trayKeepAliveTimer;
+@property(nonatomic, strong) dispatch_source_t displayRefreshTimer;
 @property(nonatomic) BOOL isFetching;
 @property(nonatomic) BOOL touchBarPanelVisible;
+@property(nonatomic) BOOL systemTrayButtonAdded;
+@property(nonatomic) BOOL didRefreshExpiredWindow;
+@property(nonatomic) NSInteger refreshGeneration;
 @end
 
 @implementation AppDelegate
@@ -474,7 +517,7 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
     self.statusItem.button.title = @" --";
 
     NSMenu *menu = NSMenu.new;
-    [menu addItemWithTitle:@"Refresh" action:@selector(refreshNow) keyEquivalent:@"r"];
+    [menu addItemWithTitle:@"Refresh" action:@selector(forceRefreshNow) keyEquivalent:@"r"];
     [menu addItemWithTitle:@"Show Touch Bar" action:@selector(showTouchBar) keyEquivalent:@"t"];
     [menu addItem:NSMenuItem.separatorItem];
     [menu addItemWithTitle:@"Quit" action:@selector(quit) keyEquivalent:@"q"];
@@ -527,16 +570,32 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 }
 
 - (void)refreshNow {
-    if (self.isFetching) return;
+    [self refreshWithForce:NO];
+}
+
+- (void)forceRefreshNow {
+    [self refreshWithForce:YES];
+}
+
+- (void)refreshWithForce:(BOOL)force {
+    if (self.isFetching && !force) return;
+    NSInteger generation = ++self.refreshGeneration;
     self.isFetching = YES;
     self.statusItem.button.title = [self titleForSnapshot:self.latest refreshing:YES];
     [self.client fetch:^(QuotaSnapshot *snapshot, NSError *error) {
+        if (generation != self.refreshGeneration) {
+            if (generation > self.refreshGeneration) self.isFetching = NO;
+            return;
+        }
         self.isFetching = NO;
-        if (snapshot) self.latest = snapshot;
+        if (snapshot) {
+            self.latest = snapshot;
+            self.didRefreshExpiredWindow = NO;
+        }
         self.statusItem.button.title = [self titleForSnapshot:self.latest refreshing:NO];
         self.touchBarController.snapshot = self.latest;
         [self.touchBarController refreshVisiblePanel];
-        [self.touchBarController addSystemTrayButton];
+        [self keepTrayButtonAlive];
     }];
 }
 
@@ -555,17 +614,36 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
 
 - (void)keepTrayButtonAlive {
     self.touchBarController.snapshot = self.latest;
-    [self.touchBarController addSystemTrayButton];
+    if (!self.systemTrayButtonAdded) {
+        [self.touchBarController addSystemTrayButton];
+        self.systemTrayButtonAdded = YES;
+    }
 }
 
 - (void)refreshDisplayedCountdowns {
+    if ([self snapshotHasExpiredWindow:self.latest]) {
+        if (!self.didRefreshExpiredWindow) {
+            self.didRefreshExpiredWindow = YES;
+            [self refreshNow];
+        }
+    } else {
+        self.didRefreshExpiredWindow = NO;
+    }
     self.statusItem.button.title = [self titleForSnapshot:self.latest refreshing:self.isFetching];
     self.touchBarController.snapshot = self.latest;
     [self.touchBarController refreshVisiblePanel];
-    [self.touchBarController addSystemTrayButton];
+    [self keepTrayButtonAlive];
+}
+
+- (BOOL)snapshotHasExpiredWindow:(QuotaSnapshot *)snapshot {
+    NSDate *now = NSDate.date;
+    if (snapshot.primary.resetsAt && [snapshot.primary.resetsAt timeIntervalSinceDate:now] <= 0.0) return YES;
+    if (snapshot.secondary.resetsAt && [snapshot.secondary.resetsAt timeIntervalSinceDate:now] <= 0.0) return YES;
+    return NO;
 }
 
 - (void)activeApplicationChanged:(NSNotification *)notification {
+    self.systemTrayButtonAdded = NO;
     [self keepTrayButtonAlive];
 }
 
@@ -584,6 +662,7 @@ static QuotaSnapshot *ReadJSONLFallback(void) {
     if (self.trayKeepAliveTimer) dispatch_source_cancel(self.trayKeepAliveTimer);
     if (self.displayRefreshTimer) dispatch_source_cancel(self.displayRefreshTimer);
     [self.touchBarController removeSystemTrayButton];
+    self.systemTrayButtonAdded = NO;
     [NSApp terminate:nil];
 }
 @end
