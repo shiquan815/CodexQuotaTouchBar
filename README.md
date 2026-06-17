@@ -18,6 +18,16 @@ It reads Codex rate-limit data from the local Codex app-server when available, t
 - Local countdown display for reset time.
 - Optional custom app icon source image with a red-to-green quota-style ring.
 
+## Changelog
+
+### 2026-06-17
+
+- Improved refresh reliability when Codex app-server hangs or returns slowly.
+- Made the menu bar `Refresh` action force a new request and keep only the newest result.
+- Switched app-server stdout/stderr collection to async reads to reduce blocking risk.
+- Show `now` when a quota window has expired and trigger a follow-up refresh.
+- Reduced repeated Touch Bar system tray registration to make the right-side icon more stable.
+
 ## What It Reads
 
 The app tries these sources in order:
